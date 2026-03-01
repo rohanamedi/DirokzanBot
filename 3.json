@@ -1,0 +1,363 @@
+import asyncio
+import random
+import json
+import os
+from telethon import TelegramClient, events
+from telethon.tl.types import PeerChat, PeerChannel
+from collections import defaultdict
+
+# BOT AYARLARI - SENİN BİLGİLERİN
+BOT_TOKEN = "8667363324:AAFGuNiGCx40dWV159iDChvdn-4ixdKf7uE"
+API_ID = 30424455  # 👈 Senin API_ID'n
+API_HASH = "af3a166038b2ba69e99aca86e614abe6"  # 👈 Senin API_HASH'in
+
+# Bot istemcisi
+client = TelegramClient("DirokzanBot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+# Aktif gruplar
+aktif_gruplar = []
+
+# Son sorulan soruları takip et (her grup için)
+son_sorular = {}
+
+# Kullanıcı puanları (grup bazında)
+# Yapı: {grup_id: {kullanici_id: puan}}
+kullanici_puanlari = defaultdict(lambda: defaultdict(int))
+
+def load_questions():
+    """3.json dosyasından soruları yükle"""
+    try:
+        with open('3.json', 'r', encoding='utf-8') as file:
+            sorular = json.load(file)
+            
+        # Her soruya bir ID ekle (cevapları takip için)
+        for i, soru in enumerate(sorular):
+            soru['id'] = i
+            
+            # Doğru cevabın hangi şık olduğunu bul
+            # A=0, B=1, C=2, D=3 şeklinde
+            harf_to_index = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+            soru['correct_index'] = harf_to_index.get(soru.get('correct', 'A'), 0)
+        
+        return sorular
+    except Exception as e:
+        print(f"❌ Sorular yüklenemedi: {e}")
+        return []
+
+# Soruları yükle
+TUM_SORULAR = load_questions()
+print(f"✅ Toplam {len(TUM_SORULAR)} tarih sorusu yüklendi")
+
+async def send_quiz_question(chat_id):
+    """Belirtilen gruba rastgele bir soru gönder"""
+    
+    if not TUM_SORULAR:
+        print("❌ Soru listesi boş!")
+        return
+    
+    # Rastgele bir soru seç
+    soru = random.choice(TUM_SORULAR)
+    
+    # Bu gruba son sorulan soruyu kaydet
+    son_sorular[chat_id] = {
+        'soru_id': soru['id'],
+        'correct_index': soru['correct_index'],
+        'cevaplayanlar': [],  # Bu soruya cevap verenleri tut
+        'dogru_sayan': 0
+    }
+    
+    question = soru.get("question")
+    answers = soru.get("answers", [])
+    
+    if not question or len(answers) < 2:
+        return
+    
+    try:
+        # Soru metnini oluştur
+        message = f"📜 **TARİH SORUSU** 📜\n\n"
+        message += f"❓ {question}\n\n"
+        
+        # Şıkları harflendir (A, B, C, D)
+        harfler = ['A', 'B', 'C', 'D']
+        for i, answer in enumerate(answers):
+            if i < len(harfler):
+                message += f"{harfler[i]}) {answer}\n"
+        
+        message += "\n⏳ Cevabınızı **A, B, C veya D** şeklinde yazın!"
+        message += "\n✨ Doğru bilen +10 puan kazanır!"
+        
+        # Gruba gönder
+        await client.send_message(chat_id, message)
+        print(f"✅ Soru gönderildi: {chat_id} grubuna - {question[:50]}...")
+        
+        # 30 saniye sonra cevap süresini bitir
+        async def cevap_suresi_bitir():
+            await asyncio.sleep(30)
+            if chat_id in son_sorular:
+                # Cevap süresi bitti mesajı gönder
+                dogru_cevap = answers[soru['correct_index']]
+                harfler = ['A', 'B', 'C', 'D']
+                dogru_harf = harfler[soru['correct_index']]
+                
+                # Bu soruda kaç kişi doğru bildi?
+                dogru_sayan = son_sorular[chat_id].get('dogru_sayan', 0)
+                
+                mesaj = f"⏰ **Süre bitti!**\n\n"
+                mesaj += f"✅ Doğru cevap: **{dogru_harf}) {dogru_cevap}**\n"
+                mesaj += f"📊 {dogru_sayan} kişi doğru bildi.\n\n"
+                
+                await client.send_message(chat_id, mesaj)
+                
+                # Puan durumunu göster
+                await show_scores(chat_id)
+                
+                # Son soruyu temizle
+                del son_sorular[chat_id]
+        
+        # Zamanlayıcıyı başlat
+        asyncio.create_task(cevap_suresi_bitir())
+        
+    except Exception as e:
+        print(f"❌ Soru gönderilemedi: {e}")
+
+async def show_scores(chat_id):
+    """Gruptaki puan durumunu göster"""
+    if chat_id not in kullanici_puanlari:
+        await client.send_message(chat_id, "📊 Henüz puan kazanan yok!")
+        return
+    
+    puanlar = kullanici_puanlari[chat_id]
+    if not puanlar:
+        await client.send_message(chat_id, "📊 Henüz puan kazanan yok!")
+        return
+    
+    # En yüksek 10 kişiyi göster
+    sirali = sorted(puanlar.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    mesaj = "🏆 **PUAN DURUMU** 🏆\n\n"
+    
+    for i, (kullanici_id, puan) in enumerate(sirali, 1):
+        try:
+            # Kullanıcı adını al
+            kullanici = await client.get_entity(kullanici_id)
+            isim = kullanici.first_name or "İsimsiz"
+            if kullanici.last_name:
+                isim += " " + kullanici.last_name
+            
+            # Kullanıcı adı varsa ekle
+            if kullanici.username:
+                isim += f" (@{kullanici.username})"
+            
+            mesaj += f"{i}. {isim}: **{puan}** puan\n"
+        except:
+            mesaj += f"{i}. Kullanıcı: **{puan}** puan\n"
+    
+    await client.send_message(chat_id, mesaj)
+
+async def quiz_dongusu():
+    """Sürekli çalışan döngü - Aktif gruplara soru gönder"""
+    print("🔄 Quiz döngüsü başladı...")
+    
+    while True:
+        if aktif_gruplar:
+            print(f"📊 Aktif grup sayısı: {len(aktif_gruplar)}")
+            
+            # Tüm aktif gruplara soru gönder
+            for grup_id in aktif_gruplar:
+                await send_quiz_question(grup_id)
+                # Gruplar arasında 10 saniye bekle (spam engeli)
+                await asyncio.sleep(10)
+            
+            print(f"⏱️  {len(aktif_gruplar)} gruba soru gönderildi. 5 dakika bekleniyor...")
+        else:
+            print("😴 Aktif grup yok, bekleniyor...")
+        
+        # 5 dakika bekle (300 saniye)
+        await asyncio.sleep(300)
+
+@client.on(events.NewMessage(pattern='/start'))
+async def start_command(event):
+    """Bot /start komutu alınca çalışır"""
+    chat = await event.get_chat()
+    chat_id = event.chat_id
+    
+    if event.is_private:
+        # Özel mesaj - kullanıcıya bilgi ver
+        await event.reply(
+            "📜 **Dîrokzan Bot'a Hoş Geldiniz!** 📜\n\n"
+            "Ben bir tarih quiz botuyum. Gruplarınıza ekleyip tarih soruları sorabilirsiniz.\n\n"
+            "**📌 Kullanım:**\n"
+            "1. Beni grubunuza ekleyin\n"
+            "2. Grupta /start yazın\n"
+            "3. 5 dakikada bir otomatik soru gelsin!\n"
+            "4. A, B, C, D yazarak cevap verin\n"
+            "5. Doğru bilen +10 puan kazanır!\n\n"
+            "**📋 Komutlar:**\n"
+            "/start - Botu başlat\n"
+            "/stop - Botu durdur\n"
+            "/puan - Puan durumunu göster\n"
+            "/sorular - Kaç soru olduğunu göster\n"
+            "/yardim - Yardım menüsü\n\n"
+            "🔗 **Botu grubuna ekle:** @DirokzanBot\n\n"
+            "İyi eğlenceler! 🎉"
+        )
+    else:
+        # Grup mesajı
+        if chat_id not in aktif_gruplar:
+            aktif_gruplar.append(chat_id)
+            
+            # Grup adını al
+            grup_adi = chat.title if hasattr(chat, 'title') else "Grup"
+            
+            await event.reply(
+                f"✅ **Bot aktif edildi!**\n\n"
+                f"📌 **Grup:** {grup_adi}\n"
+                f"⏱️ **Sıklık:** 5 dakikada bir\n"
+                f"📚 **Soru sayısı:** {len(TUM_SORULAR)}\n\n"
+                "**Nasıl oynanır?**\n"
+                "• Soru geldiğinde **A, B, C veya D** yazın\n"
+                "• Doğru cevap için **30 saniyeniz** var\n"
+                "• Her doğru cevap **+10 puan**\n\n"
+                "İlk soru hemen geliyor! 🎯"
+            )
+            
+            # Hemen ilk soruyu gönder
+            await send_quiz_question(chat_id)
+        else:
+            await event.reply("ℹ️ Bot zaten aktif durumda. 5 dakikada bir soru gelmeye devam edecek.")
+
+@client.on(events.NewMessage(pattern='/stop'))
+async def stop_command(event):
+    """Bot /stop komutu alınca durur"""
+    chat_id = event.chat_id
+    
+    if chat_id in aktif_gruplar:
+        aktif_gruplar.remove(chat_id)
+        await event.reply("⏸️ **Bot durduruldu.**\nTekrar başlatmak için /start yazın.")
+    else:
+        await event.reply("ℹ️ Bot zaten aktif değil. Başlatmak için /start yazın.")
+
+@client.on(events.NewMessage(pattern='/puan'))
+async def puan_command(event):
+    """Puan durumunu göster"""
+    chat_id = event.chat_id
+    await show_scores(chat_id)
+
+@client.on(events.NewMessage(pattern='/yardim'))
+async def yardim_command(event):
+    """Yardım komutu"""
+    await event.reply(
+        "📚 **Yardım Menüsü**\n\n"
+        "**Komutlar:**\n"
+        "/start - Botu başlat\n"
+        "/stop - Botu durdur\n"
+        "/puan - Puan durumunu göster\n"
+        "/sorular - Kaç soru olduğunu göster\n"
+        "/yardim - Bu menüyü göster\n\n"
+        "**Nasıl Oynanır?**\n"
+        "• Soru geldiğinde **A, B, C veya D** yazın\n"
+        "• Doğru cevap için **30 saniyeniz** var\n"
+        "• Her doğru cevap **+10 puan**\n"
+        "• En çok puanı toplayan lider olur!\n\n"
+        "**Örnek:**\n"
+        "Soru: Türkiye'nin başkenti neresidir?\n"
+        "A) İstanbul  B) Ankara  C) İzmir  D) Bursa\n"
+        "Cevap: **B**\n\n"
+        "📊 Puanlar her grupta ayrı tutulur."
+    )
+
+@client.on(events.NewMessage(pattern='/sorular'))
+async def sorular_command(event):
+    """Toplam soru sayısını göster"""
+    await event.reply(f"📚 Toplam **{len(TUM_SORULAR)}** tarih sorusu bulunuyor.\nYakında yenileri eklenecek! 🚀")
+
+@client.on(events.NewMessage)
+async def cevap_kontrol(event):
+    """Kullanıcı cevaplarını kontrol et ve puan ver"""
+    
+    # Sadece gruplardaki mesajları işle
+    if not event.is_group:
+        return
+    
+    chat_id = event.chat_id
+    
+    # Bot aktif değilse işlem yapma
+    if chat_id not in aktif_gruplar:
+        return
+    
+    # Son soru yoksa işlem yapma
+    if chat_id not in son_sorular:
+        return
+    
+    # Mesaj boşsa veya komutla başlıyorsa işlem yapma
+    if not event.message.text or event.message.text.startswith('/'):
+        return
+    
+    # Cevabı al (A, B, C, D)
+    cevap = event.message.text.strip().upper()
+    
+    if cevap not in ['A', 'B', 'C', 'D']:
+        # Sadece A,B,C,D kabul et, diğer mesajları görmezden gel
+        return
+    
+    # Kullanıcı daha önce bu soruya cevap vermiş mi?
+    kullanici_id = event.sender_id
+    if kullanici_id in son_sorular[chat_id].get('cevaplayanlar', []):
+        # Daha önce cevap vermiş
+        await event.reply("⚠️ Bu soruya zaten cevap verdiniz!")
+        return
+    
+    # Doğru cevap kontrolü
+    harf_to_index = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+    kullanici_index = harf_to_index.get(cevap, -1)
+    dogru_index = son_sorular[chat_id]['correct_index']
+    
+    # Cevaplayanlar listesine ekle
+    if 'cevaplayanlar' not in son_sorular[chat_id]:
+        son_sorular[chat_id]['cevaplayanlar'] = []
+    son_sorular[chat_id]['cevaplayanlar'].append(kullanici_id)
+    
+    if kullanici_index == dogru_index:
+        # Doğru cevap! +10 puan
+        kullanici_puanlari[chat_id][kullanici_id] += 10
+        
+        # Kaç kişi doğru bildi sayacını güncelle
+        if 'dogru_sayan' not in son_sorular[chat_id]:
+            son_sorular[chat_id]['dogru_sayan'] = 0
+        son_sorular[chat_id]['dogru_sayan'] += 1
+        
+        # Kullanıcının adını al
+        isim = event.sender.first_name or "Kullanıcı"
+        
+        # Kullanıcıya geri bildirim
+        await event.reply(f"✅ **DOĞRU!** +10 puan {isim}! 🎉")
+        
+        # Kullanıcının toplam puanını göster
+        toplam_puan = kullanici_puanlari[chat_id][kullanici_id]
+        await client.send_message(chat_id, f"👤 {isim} toplam **{toplam_puan}** puana ulaştı!")
+    else:
+        # Yanlış cevap
+        await event.reply(f"❌ **YANLIŞ!** Doğru cevabı bekleyin. {event.sender.first_name}")
+
+async def main():
+    """Ana fonksiyon"""
+    print("🚀 Dîrokzan Bot başlatılıyor...")
+    print(f"📚 {len(TUM_SORULAR)} tarih sorusu yüklendi")
+    print(f"🤖 Bot: @DirokzanBot")
+    print("📢 Herkesin kullanımına açık!")
+    print("⏱️  5 dakikada bir soru gönderecek")
+    print("-" * 40)
+    
+    # Botu başlat
+    await client.start()
+    print("✅ Bot başarıyla başlatıldı!")
+    print("📡 Mesajlar dinleniyor...")
+    
+    # Quiz döngüsünü arka planda başlat
+    asyncio.create_task(quiz_dongusu())
+    
+    # Botu çalışır halde tut
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    asyncio.run(main())
